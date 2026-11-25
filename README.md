@@ -1,8 +1,56 @@
 # Product catalog backend
 
+## Overview
+
 A stateless REST service for creating, retrieving, listing, filtering, updating and deleting products. It targets a catalog of a few hundred thousand rows where reads substantially outnumber writes. PostgreSQL is the source of truth, all filtering and pagination happen in the database, and USD is the only accepted currency so price comparisons are meaningful.
 
 Authentication and authorization are outside this assessment's scope. A production deployment must add them at the platform or application boundary.
+
+## Quick start
+
+Docker Desktop with Docker Compose is the only prerequisite for the normal application startup. A local Java, Maven or PostgreSQL installation is not required, and the benchmark dataset is not generated during startup.
+
+```bash
+git clone https://github.com/Anjani-225/product-catalog.git
+cd product-catalog
+docker compose up --build
+```
+
+The API is available at `http://localhost:8080`; health is reported at `http://localhost:8080/actuator/health`.
+
+Create, read, filter, update and delete a product:
+
+```bash
+# Create; note the returned id and version.
+curl -i -X POST http://localhost:8080/api/v1/products \
+  -H 'Content-Type: application/json' \
+  -d '{"sku":"LAMP-001","name":"Desk lamp","description":"LED task lamp","category":"Lighting","price":29.99,"currency":"USD"}'
+
+curl http://localhost:8080/api/v1/products/1
+
+curl 'http://localhost:8080/api/v1/products?category=Lighting&minPrice=20&maxPrice=80&page=0&size=20&sort=price&direction=asc'
+
+# Send the version from the latest read; a stale version returns 409.
+curl -i -X PUT http://localhost:8080/api/v1/products/1 \
+  -H 'Content-Type: application/json' \
+  -d '{"sku":"LAMP-001","name":"Desk lamp v2","description":"Updated","category":"Lighting","price":34.99,"currency":"USD","version":0}'
+
+curl -i -X DELETE http://localhost:8080/api/v1/products/1
+```
+
+Stop the application without deleting its persistent database volume:
+
+```bash
+docker compose down
+```
+
+To run the automated tests directly, Docker must be running for Testcontainers and Java 17 must be selected. Maven itself is not required because the repository includes the Maven Wrapper.
+
+```bash
+export JAVA_HOME=/usr/local/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home
+export PATH="$JAVA_HOME/bin:$PATH"
+./mvnw clean verify
+```
 
 ## Architecture
 
@@ -41,40 +89,15 @@ Indexes improve reads at the cost of storage and write amplification. The final 
 
 ## API contract
 
-- `POST /api/v1/products` returns `201 Created` with a `Location` header.
-- `GET /api/v1/products/{id}` returns `200 OK` or `404 Not Found`.
-- `GET /api/v1/products` returns `200 OK` with content and pagination metadata.
-- `PUT /api/v1/products/{id}` returns `200 OK`, `404 Not Found`, or `409 Conflict` for a stale version.
-- `DELETE /api/v1/products/{id}` returns `204 No Content` or `404 Not Found`.
+| Method | Path | Purpose | Success | Relevant errors |
+| --- | --- | --- | --- | --- |
+| `POST` | `/api/v1/products` | Create a product | `201` with `Location` | `400`, `409` duplicate SKU |
+| `GET` | `/api/v1/products/{id}` | Retrieve one product | `200` | `404` |
+| `GET` | `/api/v1/products` | Filter, sort and paginate | `200` | `400` |
+| `PUT` | `/api/v1/products/{id}` | Replace product details using its version | `200` | `400`, `404`, `409` stale version or duplicate SKU |
+| `DELETE` | `/api/v1/products/{id}` | Delete a product | `204` | `404` |
 
-Create a product:
-
-```bash
-curl -i -X POST http://localhost:8080/api/v1/products \
-  -H 'Content-Type: application/json' \
-  -d '{"sku":"LAMP-001","name":"Desk lamp","description":"LED task lamp","category":"Lighting","price":29.99,"currency":"USD"}'
-```
-
-Read, filter and paginate:
-
-```bash
-curl http://localhost:8080/api/v1/products/1
-curl 'http://localhost:8080/api/v1/products?category=Lighting&minPrice=20&maxPrice=80&page=0&size=20&sort=price&direction=asc'
-```
-
-Update using the version returned by the latest read:
-
-```bash
-curl -i -X PUT http://localhost:8080/api/v1/products/1 \
-  -H 'Content-Type: application/json' \
-  -d '{"sku":"LAMP-001","name":"Desk lamp v2","description":"Updated","category":"Lighting","price":34.99,"currency":"USD","version":0}'
-```
-
-Delete:
-
-```bash
-curl -i -X DELETE http://localhost:8080/api/v1/products/1
-```
+The Quick Start contains executable examples for every endpoint, including combined category and price filtering, sorting, pagination and optimistic version handling.
 
 Validation failures return `400`; missing products return `404`; duplicate SKU and stale writes return `409`. Errors contain `timestamp`, `status`, `error`, `message`, `path` and `validationErrors`.
 
@@ -90,43 +113,27 @@ Offset pagination is simple and supports direct page access, but the database mu
 
 [`Product`](src/main/java/com/example/productcatalog/entity/Product.java) uses JPA `@Version`. A PUT must send the version observed by the client. The service explicitly rejects an already-stale version even when the earlier update committed in a different transaction; Hibernate also detects a race that occurs after the explicit check. Both cases return `409 Conflict`. Reads use read-only transactions; writes use ordinary transactions and flush before returning so constraint and locking errors are mapped within the request.
 
-## Run locally
-
-Prerequisites are Docker Desktop with Compose. The local Compose credentials are intentionally non-production values and live only in [`compose.yaml`](compose.yaml).
-
-```bash
-docker compose up --build
-```
-
-The application is at `http://localhost:8080`; health is at `http://localhost:8080/actuator/health`. PostgreSQL data persists in the named `product-catalog-postgres` volume. Stop services with `docker compose down`; add `--volumes` only when intentionally deleting local data.
-
-Without containerizing the application, use the pinned Maven Wrapper and Java 17:
-
-```bash
-export JAVA_HOME=/usr/local/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home
-export PATH="$JAVA_HOME/bin:$PATH"
-./mvnw spring-boot:run
-```
-
-Database connection settings are environment variables: `DB_URL`, `DB_USERNAME`, `DB_PASSWORD`, `DB_POOL_SIZE` and `DB_POOL_MIN_IDLE`.
-
 ## Tests and verification
-
-Run all tests and package verification:
-
-```bash
-export JAVA_HOME=/usr/local/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home
-export PATH="$JAVA_HOME/bin:$PATH"
-./mvnw clean verify
-```
 
 [`ProductApiIntegrationTest`](src/test/java/com/example/productcatalog/ProductApiIntegrationTest.java) starts PostgreSQL 17.7 through Testcontainers and covers create/read/update/delete, duplicate SKU, missing products, invalid payloads, category/price/combined filters, page ordering, invalid filters, stale updates and direct JDBC attempts that violate SKU, price and currency constraints.
 
-Local verification on 2026-11-25 completed 11 tests with zero failures. The multi-stage image built and exported successfully, both Compose services became healthy, and live HTTP CRUD/filter/pagination assertions passed. The performance fixture, plans and repeatable benchmark evidence are in [`docs/performance.md`](docs/performance.md).
+Local verification on 2026-11-25 completed 11 PostgreSQL-backed integration tests with zero failures, errors or skips. Direct database-constraint tests and live HTTP CRUD, combined-filter and pagination verification also passed.
 
-## CI
+A separate, deterministic 300,000-product dataset was used for performance evaluation. The 30-second database-only workload ran four prepared `SELECT` statements per transaction with 16 clients and achieved 23,838.21 transactions/second with zero failures and 0.666 ms mean transaction latency. The HTTP workload completed 10,000 combined-filter requests at concurrency 20, achieving 2,900.99 requests/second with zero failures; latency was 5 ms median, 15 ms p95, 25 ms p99 and 78 ms maximum. A deep category page at offset 10,000 took 12.312 ms. These laptop, Docker Desktop and warm-cache measurements validate the design locally; they are not production capacity guarantees.
+
+Detailed workloads, query plans, environment and limitations are recorded in [`docs/performance.md`](docs/performance.md). Reproduce them only against a disposable local database because the dataset loader deletes existing products:
+
+```bash
+./scripts/benchmark.sh
+```
+
+## Build and CI
+
+The pinned Maven Wrapper builds and tests the application. [`Dockerfile`](Dockerfile) uses a multi-stage Java 17 build and a non-root runtime user. [`compose.yaml`](compose.yaml) supplies local-only credentials, persistent PostgreSQL storage, health checks and health-ordered startup; database settings remain external through `DB_URL`, `DB_USERNAME`, `DB_PASSWORD`, `DB_POOL_SIZE` and `DB_POOL_MIN_IDLE`.
 
 [`ci.yml`](.github/workflows/ci.yml) runs on pushes and pull requests. It checks out the repository, installs Temurin Java 17, caches Maven dependencies, runs `./mvnw --batch-mode clean verify` (including PostgreSQL Testcontainers), and only after successful tests builds the Docker image. A failed test stops the job before image verification. No arbitrary coverage threshold is imposed.
+
+The workflow is configured and its commands have been verified locally; remote GitHub Actions status is reported only after publication.
 
 ## Read-heavy scaling decisions
 
